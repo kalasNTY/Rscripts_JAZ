@@ -1,0 +1,108 @@
+library(annotatr)
+library(GenomicFeatures)
+library(rtracklayer)
+library(tidyverse)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(org.Hs.eg.db)
+library(ggplot2)
+
+###approach 2
+path_wd <- "~/Downloads/SFTP/omniCLIP_results/"
+setwd(path_wd)
+path_bed <- "~/Downloads/SFTP/omniCLIP_results/iCLIP-Matr3-HeLa_sum_G_hg38_bedGraph-cDNA-hits-in-genome.bed"
+
+# Define the genome
+genome <- 'hg38'
+
+#Build annotation from txt/db file
+hacer_raw = read.table("GROseq-Hela-GSE62046.txt", header = T) 
+colnames(hacer_raw)
+
+hacer = hacer_raw[,c(2,3,4,1)]
+hacer$score = 1
+hacer$strand = "."
+write.table(hacer, "hacer_db_hg19.bed", sep = "\t", quote = FALSE, row.names = FALSE, col.names = FALSE)
+
+
+#Import custom annotations
+GH_enhancer_path = "~/Downloads/SFTP/omniCLIP_results/genehancer_enhancers_hg38.bed"
+GH_promoter_path = "~/Downloads/SFTP/omniCLIP_results/genehancer_reg_elements_DE_hg38.bed"
+GH_ALL_path = "~/Downloads/SFTP/omniCLIP_results/genehancer_reg_elements_DE_hg38.bed"
+hacer_path = "~/Downloads/SFTP/omniCLIP_results/hacer_db_hg38.bed"
+txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene
+lncRNA <- genes(txdb, filter = list(tx_type = "lncRNA"))
+
+GH_enhancer <- read_annotations(con = GH_enhancer_path,name = 'GHenh', genome = "hg38")
+GH_promoter <- read_annotations(con = GH_promoter_path,name = 'GHpro', genome = "hg38")
+GH_ALL <- read_annotations(con = GH_ALL_path,name = 'GHall', genome = "hg38")
+hacer_enhancer <- read_annotations(con = hacer_path,name = 'Hacer', genome = "hg38")
+#lncRNA2<- read_annotations(lncRNA,name = 'lncRNA', genome = "hg38")
+
+annotations = builtin_annotations()[grep("hg38", builtin_annotations())]
+
+# Define the annotations to include: [genome]_custom_[name of custom read_annotations]
+custom_annotations <- c(
+  'hg38_custom_GHenh',
+  'hg38_custom_GHpro',
+  'hg38_custom_GHall',
+  'hg38_custom_Hacer'
+)
+
+built_annotations <-build_annotations(genome = 'hg38', annotations = c(annotations,custom_annotations))
+
+# Replace 'path_to_your_file.bed' with the actual path to your BED file
+peaks <- import(path_bed, format = 'BED')
+
+#check seqlevels and unify if needed
+seqlevels(peaks)
+seqlevels(built_annotations)
+seqlevelsStyle(peaks) <- "UCSC" 
+seqlevelsStyle(built_annotations) <- "UCSC"
+
+annotated_peaks <- annotate_regions(
+  regions = peaks,
+  annotations = built_annotations,
+  ignore.strand = TRUE,
+  quiet = FALSE
+)
+
+annotation_summary <- summarize_annotations(annotated_peaks)
+
+# Convert the summary to a data frame for plotting
+annotation_df <- as.data.frame(annotation_summary)
+
+# Ensure correct column names
+colnames(annotation_df) <- c("Feature", "Count")
+
+# Compute proportions
+annotation_df$Percentage <- (annotation_df$Count / sum(annotation_df$Count)) * 100
+
+# Stacked bar plot (single bar with feature proportions)
+ggplot(annotation_df, aes(x = "Peaks", y = Percentage, fill = Feature)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +  # Make it horizontal
+  theme_minimal() +
+  labs(title = "Proportion of CLIP Peaks Across Genomic Features",
+       x = "",
+       y = "Percentage of Peaks (%)") +
+  theme(axis.text.x = element_blank(),  # Hide x-axis text
+        axis.ticks.x = element_blank(),
+        legend.title = element_blank())
+
+# Plot as a horizontal bar graph
+ggplot(annotation_df, aes(y = reorder(Feature, Percentage), x = Percentage)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  theme_minimal() +
+  labs(title = "MATR3-iCLIP: x-link sites Across Genomic Features",
+       x = "Percentage of Peaks (%)",
+       y = "Genomic Feature") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+######
+#The annot.type values you see correspond to specific genomic regions in annotatr:
+#"hg38_genes_1to5kb" → Regions 1-5 kb upstream of genes (possibly regulatory)
+#"hg38_genes_3UTRs" → 3' UTR regions
+#"hg38_genes_5UTRs" → 5' UTR regions
+#"hg38_genes_exons" → Coding exons (but doesn't distinguish ORFs)
+#"hg38_genes_introns" → Intronic regions
+#"hg38_genes_promoters" → Gene promoter regions (default: TSS ± 2kb)
