@@ -1,0 +1,275 @@
+library(ggplot2)
+library(gridExtra)
+library(gplots)
+library(stringr)
+library(limma)
+library(biomaRt)
+library(dplyr)
+library(tidyr)
+library(pheatmap)
+library(RColorBrewer)
+library(purrr)
+
+
+path <- "~/Documents/ARGH/SPACE/"
+setwd(path)
+
+#use biomart to get uniprot IDs for ENSEMBL genes
+hs_mart <- useEnsembl(dataset = "hsapiens_gene_ensembl", biomart='ensembl', version=113)
+
+rubin = read.csv("2025-03-05_LW920_TMT_Rubinsztein.csv")
+head(rubin)
+set1 = rubin[,c("Accession","labels","log2_fold_change","p.value")]
+colnames(set1) = c("Uniprot.ID","HGNC","Log2.FC_DR", "Adj.p.Val_DR")
+paste("There are", nrow(set1) - length(unique(set1$Uniprot.ID)), "duplicates in set1")
+sina = read.csv("2025-03-05_globalSPACE_M3KO_RR.csv")
+head(sina)
+set2 = sina[,c("Uniprot.ID","Gene.names.1st","logFC.MATR3KO_RR","adj.P.Val.MATR3KO_RR")]
+colnames(set2) = c("Uniprot.ID","HGNC","Log2.FC_SR", "Adj.p.Val_SR")
+paste("There are", nrow(set2) - length(unique(set2$Uniprot.ID)), "duplicates in set2")
+
+sina2 = read.csv("MT3KO vs Ctrl Pol2-DD (+RNase).csv")
+set3 = sina2[,c("Uniprot.ID","Gene.names.1st","logFC","adj.P.Val")]
+colnames(set3) = c("Uniprot.ID","HGNC","Log2.FC_SR2", "Adj.p.Val_SR2")
+paste("There are", nrow(set3) - length(unique(set3$Uniprot.ID)), "duplicates in set3")
+
+quantile_normalize_sets <- function(data_list) {
+  normalized_list <- list()
+  for (i in seq_along(data_list)) {
+    set <- data_list[[i]]
+    # Extract numeric data (excluding metadata columns)
+    numeric_matrix <- as.matrix(set[, -c(1,2,4)])  # Exclude Uniprot.ID & HGNC
+    # Preserve row names
+    rownames(numeric_matrix) <- set$Uniprot.ID
+    # Perform quantile normalization using limma
+    norm_matrix <- normalizeBetweenArrays(numeric_matrix, method = "quantile")
+    # Restore column names and row names
+    colnames(norm_matrix) <- colnames(numeric_matrix)
+    rownames(norm_matrix) <- rownames(numeric_matrix)
+    # Convert back to data frame with metadata
+    set_norm <- set
+    set_norm[, -c(1,2,4)] <- norm_matrix
+    message("Number of rows: ", nrow(set_norm))
+    # Store normalized dataset in list
+    normalized_list[[i]] <- set_norm
+  }
+  return(normalized_list)
+}
+
+dupli <- function(setY) {
+  num_duplicates <- nrow(setY) - length(unique(setY$Uniprot.ID))
+  message("There are ", num_duplicates, " duplicates in the dataset.")
+  return(num_duplicates)
+}
+
+importSEQ <- function(file) {
+  # Read CSV and import relevant columns only
+  rnaseq <- read.csv(file)
+  setX <- rnaseq[, c("ensembl_gene_id", "hgnc_symbol", "log2FoldChange", "padj")]
+  colnames(setX) <- c("ensembl_gene_id", "HGNC", "Log2.FC_SEQ", "Adj.p.Val_SEQ")
+  # Report number of duplicates
+  #message("There are ", nrow(setX) - length(unique(setX$ensembl_gene_id)), " duplicates in ", file)
+  # Keep only the first instance of each duplicated entry
+  setX_unique <- setX %>% distinct(ensembl_gene_id, .keep_all = TRUE)
+  # Retrieve UniProt IDs using biomaRt
+  x <- getBM(attributes = c("ensembl_gene_id", "uniprotswissprot"), 
+             filters = "ensembl_gene_id", 
+             values = setX_unique$ensembl_gene_id, 
+             mart = hs_mart)
+  # Merge UniProt IDs with set4_unique
+  z <- merge(setX_unique, x, by = "ensembl_gene_id")
+  message("Number of rows after merging: ", nrow(z))
+  # Remove rows where UniProt ID is missing (emperically found to be duplicate rows)
+  z2 <- z[z$uniprotswissprot != "", ]
+  # Select final columns
+  setX_final <- z2[, c("uniprotswissprot", "HGNC", "Log2.FC_SEQ", "Adj.p.Val_SEQ")]
+  colnames(setX_final) <- c("Uniprot.ID", "HGNC", "Log2.FC_SEQ", "Adj.p.Val_SEQ")
+  setX_final <- setX_final %>% distinct(Uniprot.ID, .keep_all = TRUE)
+  return(setX_final)
+}
+
+corall1 = importSEQ("DESeq2_NP_X_mA_siC_vs_siM3.csv")
+corall2 = importSEQ("DESeq2_NP_X_pA_siC_vs_siM3.csv")
+corall3 = importSEQ("DESeq2_T_pA_siC_vs_ALL_siM3.csv")
+corall4 = importSEQ("DESeq2_T_pA_siC_vs_siM3.csv")
+corall5 = importSEQ("DESeq2_X_mA_siC_vs_siM3.csv")
+corall6 = importSEQ("DESeq2_X_pA_siC_vs_siM3.csv")
+
+
+#Handle duplicated entries in proteomics data sets: Calculate average of values in both lines and replace
+# Step 1: Identify duplicated UniProt IDs
+dup_ids <- set2$Uniprot.ID[duplicated(set2$Uniprot.ID) | duplicated(set2$Uniprot.ID, fromLast = TRUE)]
+
+# Step 2: Create set_dup with only duplicated rows
+set_dup <- set2 %>% filter(Uniprot.ID %in% dup_ids)
+
+# Step 3: Remove all duplicated rows from set2 (keep only first instance)
+set2 <- set2 %>% filter(!Uniprot.ID %in% dup_ids) 
+
+# Step 4: Average numerical values in set_dup
+set_dup <- set_dup %>%
+  group_by(Uniprot.ID) %>%
+  summarise(
+    HGNC = first(na.omit(HGNC)),   # Keep first non-NA HGNC value
+    across(where(is.numeric), mean, na.rm = TRUE)  # Apply mean only to numeric columns
+  )
+
+# Step 5: Append the averaged rows from set_dup back into set2
+set_final <- bind_rows(set2, set_dup)
+
+# Step 6: Verify uniqueness and correctness
+paste("There are", nrow(set_final) - length(unique(set_final$Uniprot.ID)), "duplicates in set2")
+
+head(set_final)
+set2 = set_final
+
+#inspect the datasets e.g. check for KD/KO to make sure ratios are all formed TREATMENT/CONTROL
+set1[set1$Uniprot.ID=="P43243",]
+set2[set2$Uniprot.ID=="P43243",]
+set3[set3$Uniprot.ID=="P43243",]
+corall1[corall1$Uniprot.ID=="P43243",]
+corall2[corall2$Uniprot.ID=="P43243",]
+corall3[corall3$Uniprot.ID=="P43243",]
+corall4[corall4$Uniprot.ID=="P43243",]
+corall5[corall5$Uniprot.ID=="P43243",]
+corall6[corall6$Uniprot.ID=="P43243",]
+
+
+#Optional: Inverse the fold change ratios if needed (CONTROL/TREATMENT)
+set3$Log2.FC_SR2 = -set3$Log2.FC_SR2
+set3[set3$Uniprot.ID=="P43243",]
+
+#Select list of data sets to be used
+data_list <- list(set1, set2, corall1, corall2, corall3, corall4, corall5, corall6)
+normalized_data <- quantile_normalize_sets(data_list)
+
+# Access individual normalized sets
+set1_norm <- normalized_data[[1]]
+set2_norm <- normalized_data[[2]]
+set3_norm <- normalized_data[[3]]
+corall1_norm <- normalized_data[[4]]
+corall2_norm <- normalized_data[[5]]
+corall3_norm <- normalized_data[[6]]
+corall4_norm <- normalized_data[[7]]
+corall5_norm <- normalized_data[[8]]
+corall6_norm <- normalized_data[[9]]
+
+head(corall4_norm)
+
+nrow(set1_norm)
+nrow(set2_norm)
+nrow(set3_norm)
+nrow(corall1_norm)
+
+#Option1 merge 2 datasets
+merged_df_a <- merge(set1_norm, set2_norm, by="Uniprot.ID", sort=FALSE)
+merged_df_b <- merge(set1_norm, set3_norm, by="Uniprot.ID", sort=FALSE)
+merged_df_c <- merge(set2_norm, set3_norm, by="Uniprot.ID", sort=FALSE)
+
+#chose comparison for analysis
+merged_df = merged_df_c
+#p value filtering for 2 merged data sets
+merged_df = merged_df[merged_df$Adj.p.Val_SR < 0.1 | merged_df$Adj.p.Val_SR2 < 0.1,]
+
+#Replace NA values with zero 
+merged_df[,c("Log2.FC_SR","Adj.p.Val_SR","Log2.FC_SR2","Adj.p.Val_SR2")] <- merged_df[,c("Log2.FC_SR","Adj.p.Val_SR","Log2.FC_SR2","Adj.p.Val_SR2")] %>%
+    mutate(across(everything(), ~ replace_na(.x, 0)))  
+merged_df_1 = merged_df
+
+
+    #Option2 retain all lines (NA values created)
+    # Merge all three dataframes using full_join
+    merged_df_1 <- reduce(normalized_data, full_join, by = "Uniprot.ID")
+    head(merged_df_1)
+    nrow(merged_df_1)
+    length(unique(merged_df_1$Uniprot.ID))
+    b =  grep("Log2.FC_", colnames(merged_df_1))
+    c = grep("Adj.p.Val_", colnames(merged_df_1))
+    a = c(b,c)
+    #drop NAs
+    merged_df_1 = merged_df_1[rowSums(is.na(merged_df_1[, a])) == 0, ]
+    #p value filtering for 3 or more merged data sets
+    # Subset rows where any column in 'c' has a value < 0.1
+    merged_df_filtered <- merged_df_1[rowSums(merged_df_1[, c] < 0.1, na.rm = TRUE) > 0, ]
+    
+    #Replace NA values with zero 
+    merged_df_filtered[,a] <- merged_df_filtered[,a] %>%
+    mutate(across(everything(), ~ replace_na(.x, 0)))
+    nrow(merged_df_filtered)
+    merged_df_1 = merged_df_filtered
+
+#Inspect duplicates all options
+length(unique(merged_df_1$Uniprot.ID))
+nrow(merged_df_1)
+table(merged_df_1$Uniprot.ID)[table(merged_df_1$Uniprot.ID) > 1]
+#Remove duplciated lines where neeeded
+merged_df_1 <- merged_df_1 %>% distinct(Uniprot.ID, .keep_all = TRUE)
+colnames(merged_df_1)
+
+#Inspect data
+lm_model <- lm(Log2.FC_DR ~ Log2.FC_SEQ.x, data = merged_df_1)
+slope <- coef(lm_model)[2]
+intercept <- coef(lm_model)[1]
+r_squared <- summary(lm_model)$r.squared
+
+# Create equation text
+eq_text <- paste0("y = ", round(slope, 3), "x + ", round(intercept, 3), 
+                  "\nR² = ", round(r_squared, 3))
+
+#print XY Scatter and check for linearity (2 at a time)
+ggplot(merged_df_1, aes(x = Log2.FC_DR, y = Log2.FC_SEQ.x)) +
+  geom_point(color = "blue", alpha = 0.7) +  # Scatter points
+  geom_smooth(method = "lm", color = "red", se = TRUE) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +  # Add reference lines
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black") +
+  labs(title = "Log2 Fold Change",
+       x = "Log2 FC (Rubinsztein)", 
+       y = "Log2 FC (CORALLseq)") +
+  annotate("text", x = min(merged_df_1$Log2.FC_DR), y = max(merged_df_1$Log2.FC_SEQ.x), 
+           label = eq_text, hjust = 0, size = 3, color = "black") +  # Add equation
+  theme_minimal()
+
+
+rownames(merged_df_1) = NULL
+rownames(merged_df_1) <- merged_df_1$Uniprot.ID
+merged_df_1$Uniprot.ID <- NULL
+head(merged_df_1)
+
+merged_df = merged_df_1
+
+nrow(merged_df)
+
+log2_fc_matrix <- as.matrix(merged_df[, grep("Log2.FC_", colnames(merged_df))])
+head(log2_fc_matrix)
+
+log2_fc_matrix <- scale(log2_fc_matrix)  # Z-score normalization
+
+#optionally replace all non meaningful fold changes with 0
+  log2_fc_matrix[log2_fc_matrix > -1 & log2_fc_matrix < 1] <- 0
+  nrow(log2_fc_matrix)
+#optionally replace NA with zeros
+  log2_fc_matrix[is.na(log2_fc_matrix)] <- 0
+  
+#remove all zero rows
+head(log2_fc_matrix)
+log2_fc_matrix <- log2_fc_matrix[rowSums(log2_fc_matrix) != 0, ]
+nrow(log2_fc_matrix)
+colnames(log2_fc_matrix)
+colnames(log2_fc_matrix) = c("Rubinsztein","globalSPACE","SEQ_NP_X_mA","SEQ_NP_X_pA","SEQ_CHR_T_pA_ALL","SEQ_CHR_T_pA","SEQ_CHR_X_mA","SEQ_CHR_X_pA")
+
+num_clusters <- 8
+
+pheatmap(log2_fc_matrix, 
+          cluster_rows = TRUE, 
+          scale = "column",
+          cluster_cols = TRUE, 
+#         filename = paste0(path_wd, "DEG_HeatMap_scaled_", exp_annot, addi, ".png"),
+          color = colorRampPalette(brewer.pal(9, "RdBu"))(100),
+          main = "Proteomics Comparison",
+          clustering_distance_rows = "euclidean", 
+          clustering_method = "ward.D2",
+          fontsize_row = 220 / nrow(log2_fc_matrix),
+          cutree_rows = num_clusters,
+          show_rownames = T,
+          border_color = NA)
+
