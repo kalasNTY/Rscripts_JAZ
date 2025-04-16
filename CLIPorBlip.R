@@ -56,6 +56,26 @@ bed_list <- lapply(bed_files, function(f) {
 
 names(bed_list) <- tools::file_path_sans_ext(basename(bed_files))
 
+#BELOW CODE BLOCK ONLY RETAINS ANNOTATED PEAKS AS PER GTF/GFF PROVIDED (OPTIONAL)
+# Load annotation file (GTF or GFF3)
+annotation_file <- "~/Downloads/SFTP/omniCLIP_results/Homo_sapiens.GRCh38.113.chr.gtf"  # or .gff3
+annot <- rtracklayer::import(annotation_file)
+
+# Keep only relevant features (e.g., exons, CDS, genes)
+#annot <- annot[annot$type %in% c("exon", "gene", "three_prime_utr")]
+annot = annot[annot$type %in% c("exon", "transcript","gene", "three_prime_utr","CDS","five_prime_utr")]
+
+# Standardize chromosome naming (e.g., UCSC-style to NCBI)
+GenomeInfoDb::seqlevelsStyle(annot) <- "NCBI"
+
+# Filter bed_list to include only overlaps with annotation
+bed_list <- lapply(bed_list, function(gr) {
+  gr <- gr[GenomicRanges::countOverlaps(gr, annot, ignore.strand = FALSE) > 0]
+  return(gr)
+})
+#ABOVE CODE BLOCK ONLY RETAINS ANNOTATED PEAKS AS PER GTF/GFF PROVIDED (OPTIONAL)
+
+
 # Assuming bed_list is a list of GRanges objects
 all_gr <- bed_list[[1]]
 for (i in 2:length(bed_list)) {
@@ -160,7 +180,7 @@ percentVar <- round(100 * pca$sdev^2 / sum(pca$sdev^2), 1)
 
 lname = length(clean_names)
 # Define grouping (replace with your actual condition labels)
-sample_group <- c(rep("ARTR-omni", 4),rep("eCLIP", 1), rep("iCLIP", 4),rep("ARTR-clippy", 4), rep("ARTR-omni", 1))  # Adjust length as needed
+sample_group <- c(rep("ARTR-omni", 2),rep("eCLIP", 2), rep("ARTR-clippy", 4),rep("ARTR-nfHB", 2), rep("iCLIP", 1))  # Adjust length as needed
 #sample_group <- c(rep("eCLIP",lname))
 
 # Add to PCA dataframe
@@ -181,7 +201,7 @@ p = ggplot(pca_df, aes(x = PC1, y = PC2, color = Sample, shape = Group, label = 
     legend.title = element_text(size = 6)     
   )
 p
-ggsave("pca_MATR3_CLIPs_vs_ARTR.png", plot = p, width = 8, height = 6, dpi = 300)
+ggsave("pca_PTBP1_CLIPs_vs_ARTR_Annotated.png", plot = p, width = 8, height = 6, dpi = 300)
 
 # Use the PCA-transformed data (samples are rows)
 pca_data <- pca$x[, 1:5]  # You can adjust the number of PCs used
